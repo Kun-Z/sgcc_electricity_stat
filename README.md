@@ -35,30 +35,121 @@
 
 1. 在homeassistant以实体显示：
 
-   | 实体entity_id                          | 说明                                               |
-   | -------------------------------------- | -------------------------------------------------- |
-   | sensor.last_electricity_usage_xxxx     | 最近一天用电量，单位KWH、度。                      |
-   | sensor.electricity_charge_balance_xxxx | 预付费显示电费余额，反之显示上月应交电费，单位元。 |
-   | sensor.yearly_electricity_usage_xxxx   | 今年总用电量，单位KWH、度。                        |
-   | sensor.yearly_electricity_charge_xxxx  | 今年总用电费，单位元。                             |
-   | sensor.month_electricity_usage_xxxx    | 最近一个月用电量，单位KWH、度。                    |
-   | sensor.month_electricity_charge_xxxx   | 上月总用电费，单位元。                             |
-   | sensor.month_valley_usage_xxxx         | 当月谷时用电量，单位KWH、度。                      |
-   | sensor.month_flat_usage_xxxx           | 当月平时用电量，单位KWH、度。                      |
-   | sensor.month_peak_usage_xxxx           | 当月峰时用电量，单位KWH、度。                      |
-   | sensor.month_tip_usage_xxxx            | 当月尖时用电量，单位KWH、度。                      |
-   | sensor.prepay_balance_xxxx             | 预付费余额/应交金额（后付费账户），单位元。        |
+   | 实体entity_id                          | 友好名称 friendly_name | 说明                                               |
+   | -------------------------------------- | ---------------------- | -------------------------------------------------- |
+   | sensor.electricity_charge_balance_xxxx | 电费余额               | 电费余额，单位元（属性 `amount_due` 为应交金额）。 |
+   | sensor.last_electricity_usage_xxxx     | 最近一天用电量         | 最近一天用电量，单位KWH、度。                      |
+   | sensor.month_electricity_usage_xxxx    | 当月用电量             | 当月用电量，单位KWH、度。                          |
+   | sensor.last_month_usage_xxxx           | 上月用电量             | 上月用电量，单位KWH、度。                          |
+   | sensor.last_month_charge_xxxx          | 上月电费               | 上月电费，单位元。                                 |
+   | sensor.yearly_electricity_usage_xxxx   | 今年用电量             | 今年总用电量，单位KWH、度。                        |
+   | sensor.yearly_electricity_charge_xxxx  | 今年电费               | 今年总用电费，单位元。                             |
+   | sensor.recent_30d_usage_xxxx           | 近30天电量             | 近30天每日用电量合计，单位KWH。                    |
+   | sensor.recent_30d_peak_usage_xxxx      | 近30天峰值电量         | 近30天每日峰时电量合计，单位KWH。                  |
+   | sensor.recent_30d_valley_usage_xxxx    | 近30天峰谷电量         | 近30天每日谷时电量合计，单位KWH。                  |
+   | sensor.recent_12m_usage_xxxx           | 近12个月电量           | 近12个月每月用电量合计，单位KWH。                  |
+   | sensor.recent_12m_charge_xxxx          | 近12个月电费           | 近12个月每月电费合计，单位元。                     |
+   | sensor.recent_12m_peak_usage_xxxx      | 近12个月峰值电量       | 近12个月每月峰时电量合计，单位KWH。                |
+   | sensor.recent_12m_valley_usage_xxxx    | 近12个月峰谷电量       | 近12个月每月谷时电量合计，单位KWH。                |
+
+   > 实体名末尾的 `_xxxx` 为户号后 4 位，仅在**多户号模式**（`MULTI_USER=true`）下添加；
+   > 默认单户号模式实体名不带后缀，例如 `sensor.month_electricity_usage`；
+   > 多户号模式下 friendly_name 也会追加户号后 4 位，如「电费余额 (0123)」。
+
+   > **数据统一从数据库读取**（`DB_TYPE=sqlite/mysql/postgresql`）；
+   > 未配置数据库时自动回退到本次爬取的实时数据（近30天/近12个月等历史序列不可用）。
+
+   可选：配置 MQTT 后，这些传感器会自动归入同一个「国网电费」设备，详见下方
+   [传感器归入同一设备](#传感器归入同一设备可选)。
+
+### 统计类传感器（近30天 / 近12个月）
+
+`sensor.recent_30d_*` 与 `sensor.recent_12m_*` 的 **state 为区间合计值**，
+逐日 / 逐月明细放在 `data` 属性（数组）中，避免 state 超过 255 字符被截断：
+
+```yaml
+# data 属性示例
+- date: "2026-10-01"    # 月度传感器为 month: "2026-10"
+  value: 12.34
+- date: "2026-10-02"
+  value: 10.02
+```
+
+同时附带 `count`（条目数）、`start`、`end`（区间起止）。
+**没有日期/月份或没有数值的记录不会出现在序列中**（例如某月无分时数据则该月缺失）。
+
+取数组示例（模板 / apexcharts-card）：
+
+```jinja
+{{ state_attr('sensor.recent_30d_usage', 'data') }}
+```
+
+> 说明：月表 / 年表的**峰值、峰谷电量没有官方数据（Vue 页面不提供）**，
+> 由 `daily` 表按日汇总回填。数据库刚开始入库时统计会偏小，随时间累积逐步准确。
+
+### 数据入库流程
+
+一次抓取的写入过程：
+
+1. `daily` 表：写入近 7~30 天的**用电量、峰值电量、峰谷电量**（按日期 upsert，已有日期更新）；
+2. `monthly` 表：写入每月**用电量、电费**（按月份 upsert）；
+3. `yearly` 表：写入今年**用电量、电费**（按年份 upsert）；
+4. 汇总回填：由 `daily` 表按月 / 按年统计**峰值、峰谷电量**，写回 `monthly` / `yearly` 表；
+5. 传感器发布：全部从上述三张表（及 `data` 表中的余额）读取。
+
 2. 可选，近三十天每日用电量数据（SQLite数据库）
-   数据库表名为 daily+userid ，在项目路径下有个homeassistant.db  的数据库文件就是；
+
+   共四张表（SQLite / MySQL / PostgreSQL 结构一致）：
+
+   | 表名                                    | 说明                                                       |
+   | --------------------------------------- | ---------------------------------------------------------- |
+   | `daily{户号}`                           | 每日数据：`date`(主键)、`usage`、`peak_usage`、`valley_usage` |
+   | `monthly{户号}`                         | 每月数据：`month`(主键)、`charge`、`usage`、`peak_usage`、`valley_usage` |
+   | `yearly{户号}`                          | 每年数据：`year`(主键)、`charge`、`usage`、`peak_usage`、`valley_usage` |
+   | `data{户号}`                            | 扩展数据：`name`(主键)、`value`（用户信息、余额日志等）     |
+
+   默认单户号模式下表名不带户号后缀，即 `daily` / `monthly` / `yearly` / `data`；
+   多户号模式（`MULTI_USER=true`）下表名带户号后缀，如 `daily1234567890123`。
+
+   在项目路径下有个homeassistant.db  的数据库文件就是；
    如需查询可以用
 
    ```
-   "SELECT * FROM dailyxxxxxxxx;"
+   "SELECT * FROM daily;"
+   "SELECT * FROM monthly;"
+   "SELECT * FROM yearly;"
    ```
 
    得到如下结果：
 
 <img src="assets/database.png" alt="mini-graph-card" width="400">
+
+## 传感器归入同一设备（可选）
+
+默认通过 Home Assistant REST API 推送状态，这种方式创建的实体**不属于任何设备**。
+如果希望在「设置 → 设备与服务」中看到统一的设备卡片（一个户号 = 一个设备，其下挂载全部传感器），
+可以配置 MQTT，程序会通过 **MQTT 发现**自动注册设备与实体：
+
+```bash
+MQTT_HOST="192.168.31.155"     # 留空则不使用 MQTT，回退 REST API
+MQTT_PORT=1883
+MQTT_USERNAME=""               # 可选
+MQTT_PASSWORD=""               # 可选
+MQTT_DISCOVERY_PREFIX="homeassistant"   # 需与 HA 的 MQTT 发现前缀一致
+```
+
+前提条件：
+
+1. Home Assistant 已安装并配置 **MQTT 集成**（需有 MQTT Broker，如 Mosquitto）；
+2. HA 的 MQTT 发现前缀与 `MQTT_DISCOVERY_PREFIX` 一致（默认 `homeassistant`）。
+
+效果：
+
+- 设备名为「国网电费」（多户号模式下为「国网电费 0123」，一个户号一个设备）；
+- 设备下包含该户号的电量、电费、峰谷等全部传感器；
+- 发现消息中使用 `default_entity_id`，会**保持原有 entity_id 不变**（如 `sensor.month_electricity_usage`），
+  已有的卡片 / 自动化无需改动（需要 HA 2023.8 及以上版本）；
+- MQTT 连接或发布失败时会自动回退到 REST API，不会丢数据。
 
 ## 适用范围
 
@@ -167,7 +258,12 @@ PASSWORD="xxxx"
 # 排除指定用户ID，如果出现一些不想检测的ID或者有些充电、发电帐号、可以使用这个环境变量，如果有多个就用","分隔，","之间不要有空格
 IGNORE_USER_ID=xxxxxxx,xxxxxxx,xxxxxxx
 
-# DB_TYPE 数据储存类型 SQLITE / MYSQL w，默认未NONE 不进行数据储存
+# 是否多户号模式，默认 false（单户号）
+# 单户号：数据库表名不带户号后缀（daily / monthly / yearly / data），传感器实体名也不带户号后缀
+# 多户号：表名带户号后缀（daily1234567890123），传感器实体名带户号后4位
+MULTI_USER=false
+
+# DB_TYPE 数据储存类型 SQLITE / MYSQL / POSTGRESQL(SUPABASE)，默认为NONE 不进行数据储存
 DB_TYPE=NONE
 
 # sqlite 数据库名，默认为homeassistant
@@ -180,6 +276,21 @@ MYSQL_USER="user"
 MYSQL_PASSWORD="password"
 MYSQL_DATABASE="sgcc"
 MYSQL_PORT=3306
+
+# postgresql(supabase) 的数据库配置
+# 方式一（推荐）：直接粘贴 Supabase 的 Connection string（URI）
+#   项目页面 → Project Settings → Database → Connection string → URI
+#   DB_TYPE=POSTGRESQL 时，下面三个变量名任选其一即可
+# POSTGRES_URL="postgresql://postgres.xxxxx:你的密码@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+# SUPABASE_DB_URL="postgresql://postgres:你的密码@db.xxxxx.supabase.co:5432/postgres"
+# DATABASE_URL="postgresql://postgres:你的密码@db.xxxxx.supabase.co:5432/postgres"
+# 方式二：离散变量（未设置 POSTGRES_URL 时生效），默认 sslmode=require、端口 5432
+# PG_HOST="db.xxxxx.supabase.co"
+# PG_USER="postgres"
+# PG_PASSWORD="password"
+# PG_DATABASE="postgres"
+# PG_PORT=5432
+# PG_SSLMODE=require
 
 ## homeassistant配置
 # 改为你的localhost为你的homeassistant地址
@@ -207,6 +318,13 @@ PUSHPLUS_TOKEN=xxxxxxx,xxxxxxx,xxxxxxx
 
 # url_push 地址 通知body {"user_id": user_id, "balance": balance}
 PUSH_URL="http://push.lan/notify"
+
+## MQTT 设备（可选，留空 MQTT_HOST 则使用 REST API，传感器不归入设备）
+#MQTT_HOST="192.168.31.155"
+#MQTT_PORT=1883
+#MQTT_USERNAME=""
+#MQTT_PASSWORD=""
+#MQTT_DISCOVERY_PREFIX="homeassistant"
 
 # 密码登录失败（登录次数过多等）的备选方案
 LOGIN_FALLBACK='qrcode'
@@ -342,11 +460,24 @@ template:
       - platform: event
         event_type: state_changed
         event_data:
-          entity_id: sensor.month_electricity_charge_xxxx
+          entity_id: sensor.last_month_usage_xxxx
     sensor:
-      - name: month_electricity_charge_xxxx
-        unique_id: month_electricity_charge_xxxx
-        state: "{{ states('sensor.month_electricity_charge_xxxx') }}"
+      - name: last_month_usage_xxxx
+        unique_id: last_month_usage_xxxx
+        state: "{{ states('sensor.last_month_usage_xxxx') }}"
+        state_class: measurement
+        unit_of_measurement: "kWh"
+        device_class: energy
+
+  - trigger:
+      - platform: event
+        event_type: state_changed
+        event_data:
+          entity_id: sensor.last_month_charge_xxxx
+    sensor:
+      - name: last_month_charge_xxxx
+        unique_id: last_month_charge_xxxx
+        state: "{{ states('sensor.last_month_charge_xxxx') }}"
         state_class: measurement
         unit_of_measurement: "CNY"
         device_class: monetary
@@ -377,70 +508,6 @@ template:
         unit_of_measurement: "CNY"
         device_class: monetary
 
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_valley_usage_xxxx
-    sensor:
-      - name: month_valley_usage_xxxx
-        unique_id: month_valley_usage_xxxx
-        state: "{{ states('sensor.month_valley_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_flat_usage_xxxx
-    sensor:
-      - name: month_flat_usage_xxxx
-        unique_id: month_flat_usage_xxxx
-        state: "{{ states('sensor.month_flat_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_peak_usage_xxxx
-    sensor:
-      - name: month_peak_usage_xxxx
-        unique_id: month_peak_usage_xxxx
-        state: "{{ states('sensor.month_peak_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.month_tip_usage_xxxx
-    sensor:
-      - name: month_tip_usage_xxxx
-        unique_id: month_tip_usage_xxxx
-        state: "{{ states('sensor.month_tip_usage_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "kWh"
-        device_class: energy
-
-  - trigger:
-      - platform: event
-        event_type: state_changed
-        event_data:
-          entity_id: sensor.prepay_balance_xxxx
-    sensor:
-      - name: prepay_balance_xxxx
-        unique_id: prepay_balance_xxxx
-        state: "{{ states('sensor.prepay_balance_xxxx') }}"
-        state_class: measurement
-        unit_of_measurement: "CNY"
-        device_class: monetary
 ```
 
 配置完成后重启HA, 刷新一下HA界面
@@ -502,7 +569,7 @@ cards:
     cards:
       - graph: none
         type: sensor
-        entity: sensor.month_electricity_charge_xxxx
+        entity: sensor.last_month_charge_xxxx
         detail: 1
         name: 上月电费
         icon: ""

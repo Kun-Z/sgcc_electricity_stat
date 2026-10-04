@@ -19,7 +19,7 @@ def main():
     if 'PYTHON_IN_DOCKER' not in os.environ:
         # 读取 .env 文件
         import dotenv
-        dotenv.load_dotenv(verbose=True)
+        dotenv.load_dotenv('env')
     if os.path.isfile('/data/options.json'):
         with open('/data/options.json') as f:
             options = json.load(f)

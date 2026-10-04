@@ -1,8 +1,3 @@
-# ── 环境变量 / 密钥文件 ──
-.env
-*.env
-!example.env
-
 # ── Python 编译缓存 ──
 __pycache__/
 *.py[cod]
@@ -35,8 +30,3 @@ assets/
 docker-compose*.yml
 Dockerfile*
 .dockerignore
-
-# ── 依赖 ──
-.venv/
-venv/
-env/

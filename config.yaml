@@ -21,6 +21,7 @@ options:
   PHONE_NUMBER: ""
   PASSWORD: ""  
   IGNORE_USER_ID: "xxxx,xxxx"
+  MULTI_USER: false
   ENABLE_DATABASE_STORAGE: false
   DB_NAME: "homeassistant.db"
   HASS_URL: "http://homeassistant.local:8123/"
@@ -35,10 +36,16 @@ options:
   LLM_BASE_URL: ""
   LLM_MODEL: ""
   CACHE_REPUBLISH_INTERVAL: 60
+  MQTT_HOST: ""
+  MQTT_PORT: 1883
+  MQTT_USERNAME: ""
+  MQTT_PASSWORD: ""
+  MQTT_DISCOVERY_PREFIX: "homeassistant"
 schema:
   PHONE_NUMBER: str
   PASSWORD: password
   IGNORE_USER_ID: str
+  MULTI_USER: bool
   ENABLE_DATABASE_STORAGE: bool
   DB_NAME: str
   HASS_URL: url
@@ -53,3 +60,8 @@ schema:
   LLM_BASE_URL: str?
   LLM_MODEL: str?
   CACHE_REPUBLISH_INTERVAL: int?
+  MQTT_HOST: str?
+  MQTT_PORT: int?
+  MQTT_USERNAME: str?
+  MQTT_PASSWORD: password?
+  MQTT_DISCOVERY_PREFIX: str?

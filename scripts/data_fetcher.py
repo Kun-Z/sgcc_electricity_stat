@@ -29,6 +29,14 @@ import vue_state
 _cloak_launch = None
 _HAS_CLOAKBROWSER = None
 
+def _to_float(value, default=0.0) -> float:
+    """安全转 float，无法转换时返回默认值。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _get_cloak_launch():
     global _cloak_launch, _HAS_CLOAKBROWSER
     if _HAS_CLOAKBROWSER is None:
@@ -64,7 +72,8 @@ class DataFetcher:
 
     def _init_db(self):
         self.db_type = os.getenv("DB_TYPE", "None").lower()
-        if self.db_type in ("sqlite", "mysql"):
+        if self.db_type in ("sqlite", "mysql", "postgresql", "postgres", "postgre",
+                            "pg", "supabase"):
             from db import create_db
             self.db = create_db(self.db_type)
             logging.info(f"使用 {self.db_type.upper()} 数据库存储数据。")
@@ -173,7 +182,7 @@ class DataFetcher:
                             headless=headless,
                             timezone="Asia/Shanghai",
                             locale=primary_lang,
-                            humanize=False,
+                            humanize=True,
                         )
                         self._context = self._browser.new_context(
                             viewport={"width": vw, "height": vh},
@@ -976,11 +985,11 @@ class DataFetcher:
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                 if self._get_current_userid() in self.IGNORE_USER_ID:
                     continue
-                balance, ldd, ldu, yc, yu, mc, mu, td, eb, bt = self._get_all_data(
+                balance, ldd, ldu, yc, yu, mc, mu, td, eb, bt, md = self._get_all_data(
                     user_id, userid_index)
                 updator.update_one_userid(
                     user_id, balance, ldd, ldu, yc, yu, mc, mu,
-                    tou_data=td, enhanced_balance=eb, bill_tou_data=bt)
+                    tou_data=td, enhanced_balance=eb, bill_tou_data=bt, months_data=md)
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             except Exception as e:
                 continue
@@ -1183,6 +1192,12 @@ class DataFetcher:
             except Exception as e:
                 logging.warning(f"[{user_id}] 电费账单分时数据获取失败: {e}")
 
+        # ── 月度序列（近12个月）──
+        months_data = self._build_months_data(usage_info, month, month_usage, month_charge)
+        if months_data:
+            logging.info(f"[{user_id}] 月度序列 {len(months_data)} 条: "
+                         f"{months_data[0].get('month')} ~ {months_data[-1].get('month')}")
+
         # ── 数据库存储 ──
         if self.db is not None:
             logging.info(f"[{user_id}] 数据库类型: {self.db_type}, 开始保存数据到数据库")
@@ -1199,6 +1214,7 @@ class DataFetcher:
                 month, month_usage, month_charge,
                 yearly_charge, yearly_usage,
                 tou_data, bill_tou_data, user_name,
+                months_data,
             )
         else:
             logging.info(f"[{user_id}] 未配置数据库, 跳过数据存储")
@@ -1211,7 +1227,35 @@ class DataFetcher:
             month_usage = month[-1] if month else None
             month_charge = month[-1] if month else None
 
-        return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, bill_tou_data
+        return balance, last_daily_date, last_daily_usage, yearly_charge, yearly_usage, month_charge, month_usage, tou_data, enhanced_balance, bill_tou_data, months_data
+
+    @staticmethod
+    def _build_months_data(usage_info: dict, month: list, month_usage: list, month_charge: list) -> list:
+        """构造月度序列 [{month, usage, charge}]，缺少月份的记录不返回。"""
+        months = []
+        cur_year = str(datetime.now().year)
+        if usage_info and usage_info.get("months"):
+            for m in usage_info["months"]:
+                key = str(m.get("month") or "").strip()
+                if not key:
+                    continue
+                months.append({
+                    "month": key,
+                    "usage": m.get("total_usage"),
+                    "charge": m.get("total_charge"),
+                })
+        elif month:
+            # DOM 兜底：把 "1月1日-1月31日" 归一化为 "YYYY-MM"
+            for i in range(len(month)):
+                m_num = re.search(r'(\d+)月', str(month[i] or ""))
+                if not m_num:
+                    continue
+                months.append({
+                    "month": f"{cur_year}-{int(m_num.group(1)):02d}",
+                    "usage": _to_float(month_usage[i], None) if i < len(month_usage or []) else None,
+                    "charge": _to_float(month_charge[i], None) if i < len(month_charge or []) else None,
+                })
+        return months
 
     def _get_user_ids(self):
         """获取用户 ID 列表。优先从 el-dropdown 获取（余额页面），
@@ -1545,7 +1589,8 @@ class DataFetcher:
                         date_list, usage_list,
                         month, month_usage, month_charge,
                         yearly_charge, yearly_usage,
-                        tou_data=None, bill_tou_data=None, user_name=""):
+                        tou_data=None, bill_tou_data=None, user_name="",
+                        months_data=None):
         if not self.db.connect_user_db(user_id):
             logging.error(f"[{user_id}] 数据库连接失败, 数据未写入")
             return
@@ -1565,8 +1610,8 @@ class DataFetcher:
                 self.db.insert_balance_log(bal_data)
                 logging.info(f"[{user_id}] 余额日志已写入: {balance} 元")
 
-            # 写入每日用电量（DOM 方式）
-            if date_list:
+            # 写入每日用电量（DOM 方式，仅在没有分时日数据时兜底）
+            if date_list and not (tou_data and tou_data.get("daily")):
                 for i in range(len(date_list)):
                     try:
                         self.db.insert_daily_data({
@@ -1590,78 +1635,43 @@ class DataFetcher:
                         logging.debug(f"[{user_id}] 分时日用电 {row.get('date')} 写入失败: {e}")
                 logging.info(f"[{user_id}] Vue state 分时日用电已写入 {tou_count} 条")
 
-            # 写入月度用电量（DOM 方式）
-            if month:
-                cur_year = str(datetime.now().year)
-                for i in range(len(month)):
+            # 写入月度用电量 / 电费（DOM 方式，仅在没有 Vue 月度数据时兜底）
+            if months_data and not (tou_data and tou_data.get("months")):
+                for m_row in months_data:
                     try:
-                        # 将 "1月1日-1月31日" 格式转为 "2026-01"
-                        m_text = month[i]
-                        m_num = re.search(r'(\d+)月', m_text)
-                        m_formatted = f"{cur_year}-{int(m_num.group(1)):02d}" if m_num else m_text
                         self.db.insert_monthly_data({
-                            "month": m_formatted,
-                            "total_usage": float(month_usage[i]) if month_usage[i] else None,
-                            "total_charge": float(month_charge[i]) if month_charge[i] else None,
-                            "user_name": user_name,
+                            "month": m_row.get("month"),
+                            "total_usage": m_row.get("usage"),
+                            "total_charge": m_row.get("charge"),
                         })
                     except Exception as e:
-                        logging.debug(f"[{user_id}] 月度 {month[i]} 写入失败: {e}")
-                logging.info(f"[{user_id}] 月度用电量已写入 {len(month)} 条")
+                        logging.debug(f"[{user_id}] 月度 {m_row.get('month')} 写入失败: {e}")
+                logging.info(f"[{user_id}] 月度用电量/电费已写入 {len(months_data)} 条")
 
-            # 写入 Vue state 分时月用电量
+            # 写入 Vue state 月用电量 / 电费（峰值、峰谷由每日表统计后回填）
             if tou_data and tou_data.get("months"):
                 for m_row in tou_data["months"]:
                     try:
-                        m_row["user_name"] = user_name
                         self.db.insert_monthly_data(m_row)
                     except Exception as e:
                         logging.debug(f"[{user_id}] 分时月度 {m_row.get('month')} 写入失败: {e}")
-                logging.info(f"[{user_id}] Vue state 分时月用电已写入 {len(tou_data['months'])} 条")
+                logging.info(f"[{user_id}] Vue state 月度用电/电费已写入 {len(tou_data['months'])} 条")
 
-            # 写入账单分时月用电量
-            if bill_tou_data and bill_tou_data.get("month"):
-                try:
-                    self.db.insert_monthly_data({
-                        "month": bill_tou_data["month"],
-                        "total_usage": bill_tou_data.get("usage"),
-                        "total_charge": bill_tou_data.get("charge"),
-                        "valley_usage": bill_tou_data.get("valley_usage", 0),
-                        "flat_usage": bill_tou_data.get("flat_usage", 0),
-                        "peak_usage": bill_tou_data.get("peak_usage", 0),
-                        "tip_usage": bill_tou_data.get("tip_usage", 0),
-                        "user_name": user_name,
-                    })
-                    logging.info(f"[{user_id}] 账单分时月度数据已写入: {bill_tou_data['month']}")
-                except Exception as e:
-                    logging.warning(f"[{user_id}] 账单分时月度写入失败: {e}")
-
-            # 写入年度用电量
+            # 写入年度用电量 / 电费（峰值、峰谷由每日表统计后回填）
             year = str(datetime.now().year)
             if yearly_usage is not None or yearly_charge is not None:
                 try:
-                    year_data = {"year": year, "user_name": user_name}
-                    if yearly_usage is not None:
-                        year_data["total_usage"] = float(yearly_usage)
-                    if yearly_charge is not None:
-                        year_data["total_charge"] = float(yearly_charge)
-                    self.db.insert_yearly_data(year_data)
-                    logging.info(f"[{user_id}] 年度用电量已写入: {year}")
-                except Exception as e:
-                    logging.warning(f"[{user_id}] 年度用电量写入失败: {e}")
-
-            # 从 Vue state 获取分时年度汇总
-            if tou_data and tou_data.get("year"):
-                try:
                     self.db.insert_yearly_data({
-                        "year": tou_data["year"],
-                        "total_usage": tou_data.get("yearly_usage"),
-                        "total_charge": tou_data.get("yearly_charge"),
-                        "user_name": user_name,
+                        "year": year,
+                        "total_usage": float(yearly_usage) if yearly_usage is not None else None,
+                        "total_charge": float(yearly_charge) if yearly_charge is not None else None,
                     })
-                    logging.info(f"[{user_id}] Vue state 年度数据已写入: {tou_data['year']}")
+                    logging.info(f"[{user_id}] 年度用电量/电费已写入: {year}")
                 except Exception as e:
-                    logging.warning(f"[{user_id}] Vue state 年度写入失败: {e}")
+                    logging.warning(f"[{user_id}] 年度数据写入失败: {e}")
+
+            # 峰值 / 峰谷：Vue 没有提供，统一由每日表按日汇总回填月表、年表
+            self.db.refresh_tou_aggregate()
 
             # 数据清理
             self.db.cleanup_old_data()
