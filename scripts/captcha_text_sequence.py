@@ -16,6 +16,8 @@ import re
 import time
 import random
 
+from click_captcha_solver import is_llm_config_error
+
 logger = logging.getLogger(__name__)
 
 _WIDGET_SELECTORS = [
@@ -292,8 +294,11 @@ def solve_text_sequence_captcha(page, login_url, retry_limit=5) -> bool:
                             return True
                         coords_ok = True
             except Exception as e:
-                logger.error(f"LLM 失败: {e}")
-                raise RuntimeError(f"LLM 调用失败: {e}") from e
+                logger.error(f"LLM 失败: {type(e).__name__}: {e}")
+                if is_llm_config_error(e):
+                    logger.error("LLM 配置错误，放弃文字顺序验证码处理（请检查 LLM_API_KEY/LLM_MODEL/LLM_BASE_URL）。")
+                    return False
+                # 临时性错误（网络/限流/上游返回非 JSON 等）：不中断流程，走刷新重试逻辑
 
         # ── LLM 失败或后续尝试：直接刷新验证码，等待跳转 ──
         logger.info("刷新验证码并等待跳转...")

@@ -13,6 +13,7 @@ from sensor_updator import SensorUpdator
 from datetime import datetime,timedelta
 from const import *
 from data_fetcher import DataFetcher
+from click_captcha_solver import LLMConfigError
 
 def main():
     global RETRY_TIMES_LIMIT
@@ -81,12 +82,19 @@ def main():
     # 如果缓存恢复成功，则跳过本次启动时的实时抓取，避免频繁重启导致账号被封
     if not updator.republish():
         logging.info("未找到有效缓存，正在从国家电网获取数据...")
-        run_task(fetcher)
+        try:
+            run_task(fetcher)
+        except Exception as e:
+            logging.exception(f"启动时的抓取任务异常（已忽略，容器继续运行）: {e}")
     else:
         logging.info("已从缓存恢复数据，跳过启动时抓取以保护账号。")
 
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            # 单个任务异常绝不能终止调度主循环，否则容器会退出
+            logging.exception(f"调度任务抛出异常（已忽略，继续运行）: {e}")
         time.sleep(1)
 
 
@@ -97,17 +105,27 @@ def republish_or_fetch(updator: SensorUpdator, fetcher: DataFetcher):
 
 
 def run_task(data_fetcher: DataFetcher):
+    """执行一轮抓取任务。
+
+    任何异常都不得导致进程退出：容器需要常驻，等待下一个调度周期自动重试。
+    """
     for retry_times in range(1, RETRY_TIMES_LIMIT + 1):
         try:
             data_fetcher.fetch()
             return
-        except RuntimeError as e:
-            # LLM 配置错误等不可恢复错误，立即退出
-            logging.error(f"致命错误，程序退出: {e}")
-            sys.exit(1)
+        except LLMConfigError as e:
+            # 配置类错误重试无意义，放弃本轮，容器继续运行等待下次调度
+            logging.error(
+                f"LLM 配置错误，放弃本轮任务（容器保持运行，请检查 LLM_API_KEY/LLM_MODEL/LLM_BASE_URL）: {e}")
+            return
         except Exception as e:
-            logging.error(f"状态刷新任务失败，原因是 [{e}]，还剩 {RETRY_TIMES_LIMIT - retry_times} 次重试机会。")
+            remaining = RETRY_TIMES_LIMIT - retry_times
+            logging.error(f"状态刷新任务失败，原因是 [{e}]，还剩 {remaining} 次重试机会。")
+            if remaining > 0:
+                # 退避重试，避免账号被风控
+                time.sleep(min(60 * retry_times, 300) + random.uniform(0, 30))
             continue
+    logging.error(f"本轮任务在 {RETRY_TIMES_LIMIT} 次重试后仍失败，保持运行并等待下一个调度周期。")
 
 def logger_init(level: str):
     logger = logging.getLogger()

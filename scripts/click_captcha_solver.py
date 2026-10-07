@@ -14,7 +14,9 @@ import io
 import json
 import logging
 import os
+import random
 import re
+import time
 from typing import List, Optional, Tuple
 
 import requests
@@ -24,6 +26,41 @@ from openai import OpenAI
 import const
 
 logger = logging.getLogger(__name__)
+
+# LLM 调用临时性失败的重试次数与退避基数（秒），可用环境变量覆盖
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
+LLM_RETRY_DELAY = float(os.getenv("LLM_RETRY_DELAY", "3"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+
+
+class LLMConfigError(RuntimeError):
+    """LLM 配置类错误（密钥无效/无权限/模型不存在等），重试无意义。"""
+
+
+class LLMTransientError(RuntimeError):
+    """LLM 临时性错误（网络抖动、限流、5xx、返回非 JSON 等），可重试。"""
+
+
+def is_llm_config_error(exc: BaseException) -> bool:
+    """判断异常是否为配置类（不可恢复）错误。
+
+    典型可恢复错误包括：
+    - json.JSONDecodeError：上游网关/代理返回了 HTML 或纯文本（如 502 页面），
+      而非 JSON，OpenAI SDK 解析响应体时抛出，属于临时性问题；
+    - RateLimitError(429)、InternalServerError(5xx)、APIConnectionError、APITimeoutError。
+    """
+    name = type(exc).__name__.lower()
+    status = getattr(exc, "status_code", None)
+
+    if isinstance(exc, json.JSONDecodeError) or name == "jsondecodeerror":
+        return False
+    if "authentication" in name or "permission" in name:
+        return True
+    if "notfound" in name:
+        return True
+    if status in (401, 403, 404):
+        return True
+    return False
 
 
 class ClickCaptchaSolver:
@@ -38,12 +75,37 @@ class ClickCaptchaSolver:
         self.base_url = base_url or os.getenv('LLM_BASE_URL') or const.LLM_BASE_URL
         self._client: Optional[OpenAI] = None
 
+    # HA Add-on 模式下 options.json 在模块导入之后才写入 os.environ，
+    # 因此这些参数在调用时再读取，保证配置修改即时生效。
+    @property
+    def max_retries(self) -> int:
+        try:
+            return int(os.getenv('LLM_MAX_RETRIES', LLM_MAX_RETRIES))
+        except (TypeError, ValueError):
+            return LLM_MAX_RETRIES
+
+    @property
+    def retry_delay(self) -> float:
+        try:
+            return float(os.getenv('LLM_RETRY_DELAY', LLM_RETRY_DELAY))
+        except (TypeError, ValueError):
+            return LLM_RETRY_DELAY
+
+    @property
+    def timeout(self) -> float:
+        try:
+            return float(os.getenv('LLM_TIMEOUT', LLM_TIMEOUT))
+        except (TypeError, ValueError):
+            return LLM_TIMEOUT
+
     @property
     def client(self) -> OpenAI:
         if self._client is None:
             if not self.api_key:
-                raise RuntimeError("LLM_API_KEY 未设置，验证码解算将失败")
-            self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+                raise LLMConfigError("LLM_API_KEY 未设置，验证码解算将失败")
+            # max_retries=0：SDK 自带重试对非 JSON 响应无效，这里改为自行控制
+            self._client = OpenAI(base_url=self.base_url, api_key=self.api_key,
+                                  timeout=self.timeout, max_retries=0)
         return self._client
 
     def solve(self, ref_url: str, main_url: str,
@@ -64,7 +126,15 @@ class ClickCaptchaSolver:
         main_uri = "data:image/png;base64," + base64.b64encode(main_raw).decode("ascii")
 
         # 3. 单次调用找到所有图标
-        coords = self._find_all_icons(icon_uris, main_uri, main_width, main_height)
+        try:
+            coords = self._find_all_icons(icon_uris, main_uri, main_width, main_height)
+        except LLMConfigError:
+            # 配置错误重试无意义，向上抛出以便上层快速放弃本轮
+            raise
+        except LLMTransientError as e:
+            # 临时性失败（含上游返回非 JSON）：不中断登录流程，交由上层刷新验证码重试
+            logger.warning(f"验证码 LLM 调用暂时失败，本轮跳过: {e}")
+            return []
         if len(coords) < 2:
             return []
 
@@ -138,23 +208,34 @@ class ClickCaptchaSolver:
         content.append({"type": "text", "text": "Use only the visible captcha image above. Return center coordinates for A, B, C as JSON. Do not use page or hidden DOM coordinates."})
         content.append({"type": "text", "text": prompt})
 
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "Output valid JSON only. No markdown, no explanation."},
-                    {"role": "user", "content": content},
-                ],
-                max_tokens=4096,
-                response_format={"type": "json_object"},
-            )
-            output = response.choices[0].message.content or ""
-            logger.info(f"大模型响应: {output[:400]}")
-            return self._parse_coordinates(output, main_width, main_height)
-        except Exception as e:
-            logger.error(f"大模型错误: {e}")
-            # 400/401/403 等配置错误不应重试，直接抛出终止
-            raise RuntimeError(f"LLM 调用失败: {e}") from e
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "Output valid JSON only. No markdown, no explanation."},
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=4096,
+                    response_format={"type": "json_object"},
+                )
+                output = (response.choices[0].message.content or "").strip()
+                if not output:
+                    raise ValueError("大模型返回内容为空")
+                logger.info(f"大模型响应: {output[:400]}")
+                return self._parse_coordinates(output, main_width, main_height)
+            except Exception as e:
+                last_error = e
+                logger.error(f"大模型错误(第 {attempt}/{self.max_retries} 次): {type(e).__name__}: {e}")
+                # 401/403/404 等配置错误立即放弃，不做无意义的重试
+                if is_llm_config_error(e):
+                    raise LLMConfigError(f"LLM 配置错误，无法调用大模型: {e}") from e
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay * attempt + random.uniform(0, 1))
+
+        raise LLMTransientError(
+            f"LLM 调用失败（已重试 {self.max_retries} 次）: {type(last_error).__name__}: {last_error}")
 
     def _parse_coordinates(self, text: str,
                            main_width: int, main_height: int) -> List[Tuple[int, int]]:

@@ -18,7 +18,7 @@ import requests
 from PIL import Image
 from playwright.sync_api import Page
 
-from click_captcha_solver import ClickCaptchaSolver
+from click_captcha_solver import ClickCaptchaSolver, LLMConfigError, is_llm_config_error
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,17 @@ def solve_captcha_in_browser(page: Page,
         logger.info(f"Main image size={main_size}")
 
         # Call LLM solver
-        coords = solver.solve(ref_url, main_url, main_size[0], main_size[1])
+        try:
+            coords = solver.solve(ref_url, main_url, main_size[0], main_size[1])
+        except LLMConfigError as e:
+            logger.error(f"LLM 配置错误，终止验证码处理: {e}")
+            return False
+        except Exception as e:
+            # 网络/限流/上游返回非 JSON 等临时性错误：刷新验证码后继续重试
+            logger.warning(f"LLM 调用异常（临时性），刷新验证码后重试: {type(e).__name__}: {e}")
+            _refresh_captcha(page, selectors)
+            time.sleep(2)
+            continue
         if not coords or len(coords) < 2:
             logger.warning(f"LLM returned only {len(coords)} coords, refreshing...")
             _refresh_captcha(page, selectors)
@@ -286,8 +296,12 @@ def _solve_slider(page: Page, selectors: dict) -> bool:
         return _check_passed(page)
 
     except Exception as e:
-        logger.error(f"Slider solve error: {e}")
-        raise RuntimeError(f"LLM 调用失败: {e}") from e
+        # 无论配置错误还是临时性错误，都只放弃本轮滑块，不向上抛出中断流程
+        if is_llm_config_error(e):
+            logger.error(f"Slider solve: LLM 配置错误，请检查 LLM_API_KEY/LLM_MODEL/LLM_BASE_URL: {e}")
+        else:
+            logger.warning(f"Slider solve error（临时性，本轮跳过）: {type(e).__name__}: {e}")
+        return False
 
 
 # ======================================================================
