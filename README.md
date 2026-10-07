@@ -1,34 +1,3 @@
-**重要说明：**原作者@renhai-lab 已于2023年10将项目归档，原仓库不再更新。这个版本是在原仓库基础上大幅改动，在此向原作者表达谢意和致敬。验证码识别已经从最开始的在线商业API替换成离线神经网络检测版本，请使用本仓库的同学点个小星星，或者打赏鼓励。
-
-添加微信通知后，我想这基本上就是这个插件的最终形态了，docker镜像压缩到300MB，后续可能只会在网站变动或者出问题才会更新，再次感谢大家的Star。
-
-**注意** 有很多新手都在提交验证码不能识别的相关issue，特在此统一说明：国网每天有登录限制，每天只能登录有限的几次，超过限制验证码识别成功也不会登录成功。因此，诸如[issue47](https://github.com/ARC-MX/sgcc_electricity_new/issues/47),[issue50](https://github.com/ARC-MX/sgcc_electricity_new/issues/50),[issue29](https://github.com/ARC-MX/sgcc_electricity_new/issues/29)这些都是这个问题，以后就不做回复了。
-
-### 入群方式
-
-最近issue太多实在是回复不过来了，特此添加QQ交流群
-通过为项目点star并微信打赏备注QQ名或QQ号等信息，入群会审核这些信息
-[关于创建QQ付费群的说明](https://github.com/ARC-MX/sgcc_electricity_new/issues/78)
-
-### 支付宝&微信 打赏码
-
-<p align="center">
-<img src="assets/Alipay.png"  width=200 style="margin-right: 70px";/>
-<img src="assets/WeiChat.jpg"  width=200 style="margin-right: 70px">
-<img src="assets/QQ_group.jpg"  width=200/" >
-</p>
-
-# ⚡️国家电网电力获取
-
-[![Docker Image CI](https://github.com/ARC-MX/sgcc_electricity_new/actions/workflows/docker-image.yml/badge.svg)](https://github.com/ARC-MX/sgcc_electricity_new/actions/workflows/docker-image.yml)
-[![Image Size](https://img.shields.io/docker/image-size/arcw/sgcc_electricity)](https://hub.docker.com/r/arcw/sgcc_electricity)
-[![Docker Pull](https://img.shields.io/docker/pulls/arcw/sgcc_electricity?color=%2348BB78&logo=docker&label=pulls)](https://hub.docker.com/r/arcw/sgcc_electricity)
-
-<p align="center">
-<img src="assets/image-20230730135540291.png" alt="mini-graph-card" width="400">
-<img src="assets/image-20240514.jpg" alt="mini-graph-card" width="400">
-</p>
-
 ## 简介
 
 本应用可以帮助你将国网的电费、用电量数据接入homeassistant，实现实时追踪家庭用电量情况；并且可以将每日用电量保存到数据库，历史有迹可循。具体提供两类数据：
@@ -414,6 +383,9 @@ docker-compose logs sgcc_electricity_app
 
 5. 配置configuration.yaml文件, 将下面中的_xxxx 替换为自己log中的_xxxx后缀。
 6. 由于是API方式传递传感器数据，所以要想重启ha实体ID可用，必须配置如下
+
+> 提示：也可以用 `python scripts/ha_template.py -o ha_template.yaml` 自动生成下面的配置
+> （多户号加 `--user-id 6400001234`，实体名会自动补上 `_1234` 后缀），生成内容覆盖全部传感器。
 
 ```yaml
 template:
